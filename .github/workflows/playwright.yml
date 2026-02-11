@@ -1,0 +1,120 @@
+name: Playwright Tests
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+    inputs:
+      test_file:
+        description: 'Test file or folder to run (e.g., tests, tests/authorization.spec.ts)'
+        required: false
+        default: 'tests'
+        type: string
+      browser:
+        description: 'Browser to run tests on'
+        required: false
+        default: 'chromium'
+        type: choice
+        options:
+          - chromium
+          - firefox
+          - webkit
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Run Playwright Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    container:
+      image: mcr.microsoft.com/playwright:v1.57.0-noble
+      options: --user root --ipc=host
+    
+    env:
+      BROWSER: ${{ inputs.browser || 'chromium' }}
+      HOME: /root
+      CI: true
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure Git safe directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Create test-results directory
+        run: mkdir -p test-results
+      
+      - name: Run Playwright tests
+        run: |
+          npx playwright test ${{ inputs.test_file || 'tests' }} \
+            --project=${{ env.BROWSER }}
+        env:
+          PLAYWRIGHT_HEADLESS: 1
+        continue-on-error: true
+      
+      - name: Debug - List test results
+        if: always()
+        run: |
+          echo "=== Current directory ==="
+          pwd
+          echo ""
+          echo "=== Contents of test-results directory ==="
+          ls -la test-results/ || echo "test-results directory not found or empty"
+          echo ""
+          echo "=== Find all XML files ==="
+          find . -name "*.xml" -type f 2>/dev/null || echo "No XML files found"
+      
+      - name: Upload Playwright Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report-${{ github.run_number }}
+          path: playwright-report/
+          retention-days: 30
+          if-no-files-found: warn
+      
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ github.run_number }}
+          path: test-results/
+          retention-days: 30
+          if-no-files-found: warn
+      
+      - name: Publish Test Results
+        uses: dorny/test-reporter@v1
+        if: always() && hashFiles('test-results/*.xml') != ''
+        with:
+          name: Playwright Test Results
+          path: 'test-results/*.xml'
+          reporter: java-junit
+          fail-on-error: false
+      
+      - name: Comment PR with results
+        uses: daun/playwright-report-comment@v3
+        if: always() && github.event_name == 'pull_request'
+        with:
+          report-path: playwright-report
